@@ -114,72 +114,71 @@ fn run() -> rusb::Result<()> {
     
     let endpoint = find_bulk_in_endpoint(&device)?;
     println!("Using bulk IN endpoint: 0x{:02x}", endpoint);
-    
-    // Try a single bulk read to see if we get any bytes.
-    let mut buf = vec![0u8; 16 * 1024]; // small-ish buffer for now
-    let timeout = Duration::from_secs(10);
-        
-    println!("Attempting bulk read...");
-    match handle.read_bulk(endpoint, &mut buf, timeout) {
-        Ok(n) => {
-            println!("Bulk read succeeded, {} bytes.", n);
-            let to_show = n.min(32);
-            print!("First up-to-32 bytes: ");
-            for b in &buf[..to_show] {
-                print!("{:02x} ", b);
-            }
-            println!();
-        }
-        Err(Error::Timeout) => {
-            println!(
-                "Bulk read timed out (no samples yet). This is still expected until we fully configure streaming."
-            );
-        }
-        Err(Error::Pipe) => {
-            eprintln!(
-                "Bulk read got PIPE (endpoint stalled). This can happen before streaming is fully configured; trying to clear halt and retry once..."
-            );
 
-            if let Err(e) = clear_bulk_endpoint_halt(&mut handle, endpoint) {
-                eprintln!("  Failed to clear halt on endpoint: {:?}", e);
-            } else {
-                // Retry once, still using the same buf + timeout
-                match handle.read_bulk(endpoint, &mut buf, timeout) {
-                    Ok(n2) => {
-                        println!(
-                            "Bulk read succeeded after clearing halt, {} bytes.",
-                            n2
-                        );
-                        let to_show = n2.min(32);
-                        print!("First up-to-32 bytes after retry: ");
-                        for b in &buf[..to_show] {
-                            print!("{:02x} ", b);
-                        }
-                        println!();
+    // Continuous capture loop.
+    let mut buf = vec![0u8; 16 * 1024]; // small-ish buffer for now
+    let timeout = Duration::from_secs(1); // shorter timeout so the loop is responsive
+    let mut total_bytes: u64 = 0;
+    let mut iterations: u64 = 0;
+
+    println!("Starting capture loop (Ctrl+C to stop)…");
+
+    loop {
+        iterations += 1;
+
+        match handle.read_bulk(endpoint, &mut buf, timeout) {
+            Ok(n) => {
+                total_bytes += n as u64;
+
+                // Print details for the first few blocks, then periodically.
+                if iterations <= 5 || iterations % 100 == 0 {
+                    println!(
+                        "Bulk read succeeded: {} bytes (total {} bytes, iter {}).",
+                        n, total_bytes, iterations
+                    );
+                    let to_show = n.min(32);
+                    print!("First up-to-32 bytes: ");
+                    for b in &buf[..to_show] {
+                        print!("{:02x} ", b);
                     }
-                    Err(Error::Timeout) => {
-                        println!(
-                            "Bulk read timed out after clearing halt (still no samples yet; this is okay until streaming is fully configured)."
-                        );
-                    }
-                    Err(e2) => {
-                        eprintln!(
-                            "Second bulk read still failed (expected until we implement full streaming): {:?}",
-                            e2
-                        );
-                    }
+                    println!();
                 }
             }
-        }
-        Err(e) => {
-            eprintln!(
-                "Bulk read failed with unexpected error: {:?}. We'll exit cleanly.",
-                e
-            );
+
+            Err(Error::Timeout) => {
+                // Occasional timeout log so you know it's still alive.
+                if iterations % 100 == 0 {
+                    println!(
+                        "Timeout on iteration {} (total {} bytes so far)…",
+                        iterations, total_bytes
+                    );
+                }
+                // Just keep looping.
+            }
+
+            Err(Error::Pipe) => {
+                eprintln!(
+                    "Bulk read got PIPE (endpoint stalled) on iter {}. Trying to clear halt…",
+                    iterations
+                );
+                if let Err(e) = clear_bulk_endpoint_halt(&mut handle, endpoint) {
+                    eprintln!("  Failed to clear halt on endpoint: {:?}. Stopping.", e);
+                    break;
+                } else {
+                    // After clearing halt, just continue the loop; next read should work.
+                    continue;
+                }
+            }
+
+            Err(e) => {
+                eprintln!("Bulk read failed with unexpected error on iter {}: {:?}", iterations, e);
+                break;
+            }
         }
     }
-        
+
     Ok(())
+
 }
 
 /// Find the first USB device matching our RTL VID/PID set.
