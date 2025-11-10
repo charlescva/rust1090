@@ -51,6 +51,12 @@ const USB_EPA_MAXPKT:  u16 = 0x2158;
 const DEMOD_CTL:       u16 = 0x3000;
 const DEMOD_CTL_1:     u16 = 0x300b;
 
+// FIR_LEN = 16
+const FIR_DEFAULT: [i16; 16] = [
+    -54, -36, -41, -40, -32, -14, 14, 53,     // 8-bit signed
+    101, 156, 215, 273, 327, 372, 404, 421,   // 12-bit signed
+];
+
 
 fn main() {
     if let Err(e) = run() {
@@ -79,8 +85,9 @@ fn run() -> rusb::Result<()> {
         eprintln!("Vendor USB register test failed: {:?}", e);
     }
     
+    //init baseband
     if let Err(e) = init_baseband(&mut handle) {
-    eprintln!("Baseband init failed: {:?}", e);
+        eprintln!("Baseband init failed: {:?}", e);
     }
     
     // test demod register access
@@ -94,9 +101,9 @@ fn run() -> rusb::Result<()> {
     } else {
         eprintln!("rtl_set_sample_rate failed; continuing anyway.");
     }
-        
+
     // enable internal test mode (8-bit counter stream)
-    if let Err(e) = rtl_set_testmode(&mut handle, true) {
+    if let Err(e) = rtl_set_testmode(&mut handle, false) {
         eprintln!("rtl_set_testmode failed: {:?}", e);
     }
     
@@ -130,7 +137,7 @@ fn run() -> rusb::Result<()> {
         }
         Err(Error::Pipe) => {
             eprintln!(
-                "Bulk read got PIPE (endpoint stalled). This can happen before streaming is fully configured; trying to clear halt and retry once…"
+                "Bulk read got PIPE (endpoint stalled). This can happen before streaming is fully configured; trying to clear halt and retry once..."
             );
 
             if let Err(e) = clear_bulk_endpoint_halt(&mut handle, endpoint) {
@@ -221,7 +228,7 @@ fn open_and_claim(
     #[cfg(unix)]
     {
         if handle.kernel_driver_active(iface)? {
-            println!("Kernel driver is active on interface {iface}, detaching…");
+            println!("Kernel driver is active on interface {iface}, detaching...");
             handle.detach_kernel_driver(iface)?;
         }
     }
@@ -230,10 +237,10 @@ fn open_and_claim(
     // We query the first configuration value to be explicit.
     let config_desc = device.config_descriptor(0)?;
     let config_value = config_desc.number();
-    println!("Setting active configuration to {}…", config_value);
+    println!("Setting active configuration to {}...", config_value);
     handle.set_active_configuration(config_value)?;
 
-    println!("Claiming interface {iface}…");
+    println!("Claiming interface {iface}...");
     handle.claim_interface(iface)?;
 
     println!("Interface claimed successfully.");
@@ -408,7 +415,7 @@ fn rtl_set_demod_reg(
 fn test_usb_sysctl_register(
     handle: &mut DeviceHandle<GlobalContext>,
 ) -> Result<(), rusb::Error> {
-    println!("Testing vendor-specific control transfers (USB_SYSCTL_0 at 0x2000)…");
+    println!("Testing vendor-specific control transfers (USB_SYSCTL_0 at 0x2000)...");
 
     let mut buf = [0u8; 1];
 
@@ -451,7 +458,7 @@ fn test_demod_register(
     handle: &mut DeviceHandle<GlobalContext>,
 ) -> Result<(), rusb::Error> {
     println!(
-        "Testing demod vendor-specific control transfers (page=0x{:02x}, addr=0x{:04x})…",
+        "Testing demod vendor-specific control transfers (page=0x{:02x}, addr=0x{:04x})...",
         DEMOD_PAGE_SYS,
         DEMOD_REG_SYS_TEST,
     );
@@ -578,34 +585,92 @@ fn rtl_demod_write_reg(
     rtl_set_demod_reg(handle, page, addr, &data[..len as usize])
 }
 
-
 fn init_baseband(handle: &mut DeviceHandle<GlobalContext>) -> Result<(), rusb::Error> {
-    println!("Initializing baseband (USB + demod power-up)…");
+    println!("Initializing baseband (USB + demod power-up)...");
 
-    // 1) USB init: match rtlsdr_init_baseband()
-    rtl_write_reg(handle, BLOCK_USBB, USB_SYSCTL,     0x0009, 1)?;
+    // --- initialize USB ---
+    // rtlsdr_write_reg(dev, USBB, USB_SYSCTL, 0x09, 1);
+    rtl_write_reg(handle, BLOCK_USBB, USB_SYSCTL_0, 0x0009, 1)?;
+
+    // rtlsdr_write_reg(dev, USBB, USB_EPA_MAXPKT, 0x0002, 2);
     rtl_write_reg(handle, BLOCK_USBB, USB_EPA_MAXPKT, 0x0002, 2)?;
-    rtl_write_reg(handle, BLOCK_USBB, USB_EPA_CTL,    0x1002, 2)?;
 
-    // 2) Power on demod: DEMOD_CTL_1 and DEMOD_CTL in SYSB space
+    // rtlsdr_write_reg(dev, USBB, USB_EPA_CTL, 0x1002, 2);
+    rtl_write_reg(handle, BLOCK_USBB, USB_EPA_CTL, 0x1002, 2)?;
+
+    // --- power on demod ---
+    // rtlsdr_write_reg(dev, SYSB, DEMOD_CTL_1, 0x22, 1);
     rtl_write_reg(handle, BLOCK_SYSB, DEMOD_CTL_1, 0x0022, 1)?;
-    rtl_write_reg(handle, BLOCK_SYSB, DEMOD_CTL,   0x00e8, 1)?;
 
-    // 3) Reset demod: same sequence you quoted
-    //    rtlsdr_demod_write_reg(dev, 1, 0x01, 0x14, 1);
-    //    rtlsdr_demod_write_reg(dev, 1, 0x01, 0x10, 1);
+    // rtlsdr_write_reg(dev, SYSB, DEMOD_CTL, 0xe8, 1);
+    rtl_write_reg(handle, BLOCK_SYSB, DEMOD_CTL, 0x00e8, 1)?;
+
+    // --- reset demod (bit 3, soft_rst) ---
+    // rtlsdr_demod_write_reg(dev, 1, 0x01, 0x14, 1);
+    // rtlsdr_demod_write_reg(dev, 1, 0x01, 0x10, 1);
     rtl_demod_write_reg(handle, 1, 0x0001, 0x0014, 1)?;
     rtl_demod_write_reg(handle, 1, 0x0001, 0x0010, 1)?;
 
+    // --- disable spectrum inversion and adjacent channel rejection ---
+    // rtlsdr_demod_write_reg(dev, 1, 0x15, 0x00, 1);
+    // rtlsdr_demod_write_reg(dev, 1, 0x16, 0x0000, 2);
+    rtl_demod_write_reg(handle, 1, 0x0015, 0x0000, 1)?;
+    rtl_demod_write_reg(handle, 1, 0x0016, 0x0000, 2)?;
+
+    // --- clear both DDC shift and IF frequency registers ---
+    // for (i = 0; i < 6; i++)
+    //     rtlsdr_demod_write_reg(dev, 1, 0x16 + i, 0x00, 1);
+    for offset in 0u16..6 {
+        rtl_demod_write_reg(handle, 1, 0x0016 + offset, 0x0000, 1)?;
+    }
+
+    // --- program FIR ---
+    rtl_set_fir(handle)?;
+
+    // --- enable SDR mode, disable DAGC (bit 5) ---
+    // rtlsdr_demod_write_reg(dev, 0, 0x19, 0x05, 1);
+    rtl_demod_write_reg(handle, 0, 0x0019, 0x0005, 1)?;
+
+    // --- init FSM state-holding register ---
+    // rtlsdr_demod_write_reg(dev, 1, 0x93, 0xf0, 1);
+    // rtlsdr_demod_write_reg(dev, 1, 0x94, 0x0f, 1);
+    rtl_demod_write_reg(handle, 1, 0x0093, 0x00f0, 1)?;
+    rtl_demod_write_reg(handle, 1, 0x0094, 0x000f, 1)?;
+
+    // --- disable AGC (en_dagc, bit 0) ---
+    // rtlsdr_demod_write_reg(dev, 1, 0x11, 0x00, 1);
+    rtl_demod_write_reg(handle, 1, 0x0011, 0x0000, 1)?;
+
+    // --- disable RF and IF AGC loop ---
+    // rtlsdr_demod_write_reg(dev, 1, 0x04, 0x00, 1);
+    rtl_demod_write_reg(handle, 1, 0x0004, 0x0000, 1)?;
+
+    // --- disable PID filter (enable_PID = 0) ---
+    // rtlsdr_demod_write_reg(dev, 0, 0x61, 0x60, 1);
+    rtl_demod_write_reg(handle, 0, 0x0061, 0x0060, 1)?;
+
+    // --- opt_adc_iq = 0, default ADC_I/ADC_Q datapath ---
+    // rtlsdr_demod_write_reg(dev, 0, 0x06, 0x80, 1);
+    rtl_demod_write_reg(handle, 0, 0x0006, 0x0080, 1)?;
+
+    // --- Enable Zero-IF, DC cancellation, IQ estimation/compensation ---
+    // rtlsdr_demod_write_reg(dev, 1, 0xb1, 0x1b, 1);
+    rtl_demod_write_reg(handle, 1, 0x00b1, 0x001b, 1)?;
+
+    // --- disable 4.096 MHz clock output on pin TP_CK0 ---
+    // rtlsdr_demod_write_reg(dev, 0, 0x0d, 0x83, 1);
+    rtl_demod_write_reg(handle, 0, 0x000d, 0x0083, 1)?;
+
     Ok(())
 }
+
 
 fn clear_bulk_endpoint_halt(
     handle: &mut DeviceHandle<GlobalContext>,
     endpoint: u8,
 ) -> Result<(), rusb::Error> {
     println!(
-        "Clearing halt (STALL) condition on endpoint 0x{:02x}…",
+        "Clearing halt (STALL) condition on endpoint 0x{:02x}...",
         endpoint
     );
     handle.clear_halt(endpoint)?;
@@ -613,7 +678,7 @@ fn clear_bulk_endpoint_halt(
 }
 
 fn rtl_reset_buffer(handle: &mut DeviceHandle<GlobalContext>) -> Result<(), rusb::Error> {
-    println!("Resetting RTL2832U USB FIFO/buffer…");
+    println!("Resetting RTL2832U USB FIFO/buffer...");
 
     // Match rtlsdr_reset_buffer(dev) from librtlsdr.c:
     //   rtlsdr_write_reg(dev, USBB, USB_EPA_CTL, 0x1002, 2);
@@ -635,7 +700,7 @@ fn rtl_set_testmode(
     let value: u16 = if on { 0x03 } else { 0x05 };
 
     println!(
-        "Setting RTL2832U test mode {} (page=0, addr=0x0019, val=0x{:02x})…",
+        "Setting RTL2832U test mode {} (page=0, addr=0x0019, val=0x{:02x})...",
         if on { "ON" } else { "OFF" },
         value
     );
@@ -724,3 +789,69 @@ fn rtl_set_sample_rate(
 
     Ok(real_rate)
 }
+
+/// Program the RTL2832U FIR filter with the default coefficients.
+///
+/// This mirrors rtlsdr_set_fir(dev) from librtlsdr.c:
+/// - First 8 taps: int8_t
+/// - Next 8 taps: int12_t, packed into 12 bytes
+/// - Total 20 bytes written to demod page=1, addr 0x1c..0x2f
+fn rtl_set_fir(handle: &mut DeviceHandle<GlobalContext>) -> Result<(), rusb::Error> {
+    println!("Programming RTL2832U FIR coefficients...");
+
+    let mut fir_bytes = [0u8; 20];
+
+    // format: int8_t[8]
+    for i in 0..8 {
+        let val = FIR_DEFAULT[i];
+        // Sanity check like librtlsdr does
+        if val < -128 || val > 127 {
+            eprintln!("FIR_DEFAULT[{}] out of int8_t range: {}", i, val);
+            return Ok(()); // don't crash; just skip if somehow broken
+        }
+        fir_bytes[i] = val as i8 as u8;
+    }
+
+    // format: int12_t[8], packed into 12 bytes
+    //
+    // fir[8 + i*3/2]     = val0 >> 4;
+    // fir[8 + i*3/2 + 1] = (val0 << 4) | ((val1 >> 8) & 0x0f);
+    // fir[8 + i*3/2 + 2] = val1;
+    //
+    for i in (0..8).step_by(2) {
+        let val0 = FIR_DEFAULT[8 + i];
+        let val1 = FIR_DEFAULT[8 + i + 1];
+
+        if val0 < -2048 || val0 > 2047 || val1 < -2048 || val1 > 2047 {
+            eprintln!(
+                "FIR_DEFAULT 12-bit taps out of range: i={}, val0={}, val1={}",
+                i, val0, val1
+            );
+            return Ok(());
+        }
+
+        let base = 8 + (i * 3 / 2);
+
+        // Do all bit ops in i32 to avoid type mismatches & sign issues,
+        // then mask and cast down to u8.
+        let v0 = val0 as i32;
+        let v1 = val1 as i32;
+
+        let b0 = ((v0 >> 4) & 0xff) as u8;
+        let b1 = (((v0 << 4) & 0xf0) | ((v1 >> 8) & 0x0f)) as u8;
+        let b2 = (v1 & 0xff) as u8;
+
+        fir_bytes[base] = b0;
+        fir_bytes[base + 1] = b1;
+        fir_bytes[base + 2] = b2;
+    }
+
+
+    // Write 20 bytes to demod page=1, registers 0x1c .. 0x1c+19
+    for (i, &b) in fir_bytes.iter().enumerate() {
+        rtl_demod_write_reg(handle, 1, 0x001c + i as u16, b as u16, 1)?;
+    }
+
+    Ok(())
+}
+
