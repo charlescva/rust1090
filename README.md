@@ -1,6 +1,7 @@
 # rust1090_raw
 
 `rust1090_raw` is a from-scratch Rust experiment that talks directly to an RTL2832U USB SDR dongle (e.g. RTL-SDR) **without** using any existing SDR/rtl-sdr/librtlsdr bindings.
+<img width="861" height="864" alt="image" src="https://github.com/user-attachments/assets/5871b93c-7f73-42b0-ab88-fe0defe5d07d" />
 
 Right now it:
 
