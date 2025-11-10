@@ -61,6 +61,9 @@ const FIR_DEFAULT: [i16; 16] = [
     101, 156, 215, 273, 327, 372, 404, 421,   // 12-bit signed
 ];
 
+// ADS-B center frequency (Hz)
+const ADSB_CENTER_FREQ_HZ: u32 = 1_090_000_000;
+
 
 fn main() {
     if let Err(e) = run() {
@@ -125,6 +128,14 @@ fn run() -> rusb::Result<()> {
         println!("rtl_set_sample_rate: configured real_rate ≈ {} Hz", real_rate);
     } else {
         eprintln!("rtl_set_sample_rate failed; continuing anyway.");
+    }
+    
+    // Configure RF front-end for ADS-B @ 1090 MHz (placeholder for now).
+    if let Err(e) = configure_for_adsb_1090mhz(&mut handle) {
+        eprintln!(
+            "configure_for_adsb_1090mhz failed: {:?}. Continuing with existing tuner settings.",
+            e
+        );
     }
 
     // enable internal test mode (8-bit counter stream)
@@ -890,4 +901,33 @@ fn rtl_set_fir(handle: &mut DeviceHandle<GlobalContext>) -> Result<(), rusb::Err
 
     Ok(())
 }
+
+/// Configure the front-end for ADS-B reception around 1090 MHz.
+///
+/// NOTE: Right now this is just a structural placeholder:
+/// - It assumes an R820T/R820T2-style tuner connected via I²C.
+/// - The actual tuner programming (PLL setup, filters, etc.) still needs
+///   to be ported from tuner_r82xx.c in librtlsdr.
+/// Once that is done, this function should:
+///   1) Program the tuner to ADSB_CENTER_FREQ_HZ
+///   2) Optionally configure tuner IF bandwidth
+///   3) Ensure the demod's IF / DDC configuration matches (Zero-IF in our case)
+fn configure_for_adsb_1090mhz(
+    handle: &mut DeviceHandle<GlobalContext>,
+) -> rusb::Result<()> {
+    println!(
+        "configure_for_adsb_1090mhz: tuner programming not yet implemented.\n\
+         The device is still using whatever RF center frequency the tuner\n\
+         powers up with (or what a previous tool like rtl_test configured)."
+    );
+
+    // When you port the tuner code, this is where you'll:
+    //   - Initialize the tuner (if not already done)
+    //   - Call a function like `r82xx_set_freq(handle, ADSB_CENTER_FREQ_HZ)`
+    //   - Possibly set tuner bandwidth (around a few MHz)
+    //
+    // For now, we just return Ok so the rest of the pipeline runs unchanged.
+    Ok(())
+}
+
 
