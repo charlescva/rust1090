@@ -1,4 +1,4 @@
-# rust1090 - ADS-B in Pure Rust
+# rust1090 - ADS-B in Pure Rust!
 
 `rust1090` is a from-scratch Rust experiment that talks directly to an RTL2832U USB SDR dongle (e.g. RTL-SDR) **without** using any existing SDR / rtl-sdr / librtlsdr bindings.
 
