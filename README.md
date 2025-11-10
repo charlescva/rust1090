@@ -65,7 +65,7 @@ At its current stage, the program:
    * Allocates a 16 KiB buffer and issues a synchronous bulk read
    * On success, prints the first 32 bytes in hex
 
-You should see:
+You should see a continuous loop printing the first 32 bytes of the 16KiB from the bulk endpoint:
 
 * With **test mode ON**: a clean monotonically increasing byte pattern
   e.g. `… e5 e6 e7 e8 … fe ff 00 01 02 03 04 …`
@@ -160,7 +160,6 @@ If you see `Timeout` or `Pipe` messages, that usually means:
 
 * No tuner configuration yet (no real 1090 MHz tuning)
 * No ADS-B / Mode S demod or decoding
-* Only a single synchronous bulk read is done (no continuous capture loop)
 * USB VID/PID is hard-coded for classic RTL2832U sticks
 * No cross-platform support beyond “whatever libusb + rusb can handle” (tested on Linux)
 
@@ -170,23 +169,18 @@ If you see `Timeout` or `Pipe` messages, that usually means:
 
 Things that could be added on top of the current code:
 
-1. **Continuous capture loop**
-
-   * Keep reading from the bulk endpoint in a loop
-   * Optionally write I/Q to a file (e.g. `capture.iq`) for offline analysis
-
-2. **Tuner support**
+1. **Tuner support**
 
    * Implement the same I²C register programming as librtlsdr for R8xx tuners
    * Add a function like `set_center_frequency(1_090_000_000)` (1090 MHz)
 
-3. **ADS-B decoder**
+2. **ADS-B decoder**
 
    * Implement amplitude-based demod (like dump1090) over 2.4 MS/s I/Q
    * Detect Mode S preambles and decode frames
    * Display or output decoded ADS-B messages
 
-4. **Command-line options**
+3. **Command-line options**
 
    * Select sample rate, test mode, center frequency, buffer size, etc.
 

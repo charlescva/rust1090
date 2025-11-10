@@ -9,7 +9,11 @@ use rusb::{
     self, devices, Device, DeviceDescriptor, DeviceHandle, Direction, GlobalContext, TransferType, Error, 
 };
 
-use std::time::Duration;    
+use std::time::Duration;
+use std::fs::File;
+use std::io::BufWriter;
+use std::io::Write;
+
 
 const RTL_VID: u16 = 0x0bda;
 // Common Realtek DVB-T dongle PIDs used by RTL-SDR sticks.
@@ -67,6 +71,27 @@ fn main() {
 
 fn run() -> rusb::Result<()> {
     println!("rust1090_raw: probing for RTL2832 USB device...");
+    
+    // Optional I/Q output file: if the first CLI argument is present,
+    // treat it as a path to write raw IQ samples.
+    let iq_out_path = std::env::args().nth(1);
+    let mut iq_out: Option<BufWriter<File>> = match iq_out_path {
+        Some(path) => {
+            println!("I/Q capture enabled. Writing raw samples to: {}", path);
+            match File::create(&path) {
+                Ok(f) => Some(BufWriter::new(f)),
+                Err(e) => {
+                    eprintln!("Failed to create I/Q output file '{}': {:?}. Continuing without file output.", path, e);
+                    None
+                }
+            }
+        }
+        None => {
+            println!("No I/Q output file specified. Running in console-only mode.");
+            None
+        }
+    };
+
     
     let (device, desc) = find_rtl_device()?;
     println!(
@@ -129,6 +154,18 @@ fn run() -> rusb::Result<()> {
         match handle.read_bulk(endpoint, &mut buf, timeout) {
             Ok(n) => {
                 total_bytes += n as u64;
+                
+                // If we have an output file, append this buffer.
+                if let Some(writer) = iq_out.as_mut() {
+                    if let Err(e) = writer.write_all(&buf[..n]) {
+                        eprintln!(
+                            "Failed to write {} bytes of IQ data to file: {:?}. Disabling file output.",
+                            n, e
+                        );
+                        // Drop the writer so we don't keep spamming errors.
+                        iq_out = None;
+                    }
+                }
 
                 // Print details for the first few blocks, then periodically.
                 if iterations <= 5 || iterations % 100 == 0 {
