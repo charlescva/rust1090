@@ -2,7 +2,8 @@
 // Open it
 // claim the interface
 // find the bulk IN endpoint
-// try to read raw bytes.
+// try to read raw bytes continuously.
+// optionally write raw bytes to fs.
 // Bus 001 Device 003: ID 0bda:2832 Realtek Semiconductor Corp. RTL2832U DVB-T
 
 use rusb::{
@@ -15,54 +16,7 @@ use std::io::BufWriter;
 use std::io::Write;
 
 
-const RTL_VID: u16 = 0x0bda;
-// Common Realtek DVB-T dongle PIDs used by RTL-SDR sticks.
-// Adjust/add if your lsusb shows something else.
-const RTL_PIDS: &[u16] = &[
-    0x2832, // RTL2832U (common "RTL2832U" DVB-T)
-];
-
-// Vendor-specific control transfer flags for RTL2832U
-// bmRequestType values from RTL2832U datasheet vendor command table.
-// 0xC0 = IN, Vendor, Device  |  0x40 = OUT, Vendor, Device
-const CTRL_IN: u8 = 0xC0;
-const CTRL_OUT: u8 = 0x40;
-
-// Control transfer timeout (milliseconds)
-const CTRL_TIMEOUT_MS: u64 = 1000;
-
-// USB register address we’ll test: USB_SYSCTL byte 0 at 0x2000
-// (see RTL2832U datasheet, USB SIE control registers). :contentReference[oaicite:1]{index=1}
-const USB_SYSCTL_0: u16 = 0x2000;
-
-// Demod "pages" and a known-safe test register.
-// These values are taken from how librtlsdr probes the RTL2832U demod: it uses
-// rtlsdr_demod_read_reg(dev, 0x0a, 0x01, 1). :contentReference[oaicite:1]{index=1}
-const DEMOD_PAGE_SYS: u8 = 0x0a;
-const DEMOD_REG_SYS_TEST: u16 = 0x0001;
-
-// RTL2832 "blocks" (same as enum blocks in librtlsdr)
-const BLOCK_DEMODB: u8 = 0;
-const BLOCK_USBB:  u8 = 1;
-const BLOCK_SYSB:  u8 = 2;
-// (others exist but we don't need them yet)
-
-// USB and SYS register addresses (same values you found)
-const USB_SYSCTL:      u16 = 0x2000;
-const USB_EPA_CTL:     u16 = 0x2148;
-const USB_EPA_MAXPKT:  u16 = 0x2158;
-
-const DEMOD_CTL:       u16 = 0x3000;
-const DEMOD_CTL_1:     u16 = 0x300b;
-
-// FIR_LEN = 16
-const FIR_DEFAULT: [i16; 16] = [
-    -54, -36, -41, -40, -32, -14, 14, 53,     // 8-bit signed
-    101, 156, 215, 273, 327, 372, 404, 421,   // 12-bit signed
-];
-
-// ADS-B center frequency (Hz)
-const ADSB_CENTER_FREQ_HZ: u32 = 1_090_000_000;
+mod constants; // Declares the constants module
 
 
 fn main() {
@@ -244,7 +198,7 @@ fn find_rtl_device() -> rusb::Result<(Device<GlobalContext>, DeviceDescriptor)> 
         let vid = desc.vendor_id();
         let pid = desc.product_id();
         
-        if vid == RTL_VID && RTL_PIDS.contains(&pid) {
+        if vid == constants::RTL_VID && constants::RTL_PIDS.contains(&pid) {
             println!(
                 "Matched Realtek RTL device at bus {} address {} (VID={:#06x}, PID={:#06x})",
                 device.bus_number(),
@@ -364,7 +318,7 @@ fn rtl_get_usb_reg(
     addr: u16,
     buf: &mut [u8],
 ) -> Result<usize, rusb::Error> {
-    let request_type = CTRL_IN;
+    let request_type = constants::CTRL_IN;
     let request = 0u8; // bRequest is "x" in the datasheet; rtl-sdr uses 0.
     let value = addr;
     let index = 0x0100u16; // USB block, GetUSBReg (see vendor command table). :contentReference[oaicite:2]{index=2}
@@ -375,7 +329,7 @@ fn rtl_get_usb_reg(
         value,
         index,
         buf,
-        Duration::from_millis(CTRL_TIMEOUT_MS),
+        Duration::from_millis(constants::CTRL_TIMEOUT_MS),
     )
 }
 
@@ -392,7 +346,7 @@ fn rtl_set_usb_reg(
     addr: u16,
     data: &[u8],
 ) -> Result<usize, rusb::Error> {
-    let request_type = CTRL_OUT;
+    let request_type = constants::CTRL_OUT;
     let request = 0u8;
     let value = addr;
     let index = 0x0110u16; // USB block, SetUSBReg. :contentReference[oaicite:3]{index=3}
@@ -403,7 +357,7 @@ fn rtl_set_usb_reg(
         value,
         index,
         data,
-        Duration::from_millis(CTRL_TIMEOUT_MS),
+        Duration::from_millis(constants::CTRL_TIMEOUT_MS),
     )
 }
 
@@ -422,12 +376,12 @@ fn rtl_get_demod_reg(
     let value: u16 = (addr << 8) | 0x20;
 
     handle.read_control(
-        CTRL_IN,  // 0xC0: device-to-host, vendor, device
+        constants::CTRL_IN,  // 0xC0: device-to-host, vendor, device
         0,        // bRequest
         value,    // wValue
         index,    // wIndex
         buf,
-        Duration::from_millis(CTRL_TIMEOUT_MS),
+        Duration::from_millis(constants::CTRL_TIMEOUT_MS),
     )
 }
 
@@ -445,12 +399,12 @@ fn rtl_set_demod_reg(
     let value: u16 = (addr << 8) | 0x20;
 
     handle.write_control(
-        CTRL_OUT, // 0x40: host-to-device, vendor, device
+        constants::CTRL_OUT, // 0x40: host-to-device, vendor, device
         0,        // bRequest
         value,    // wValue
         index,    // wIndex
         data,
-        Duration::from_millis(CTRL_TIMEOUT_MS),
+        Duration::from_millis(constants::CTRL_TIMEOUT_MS),
     )
 }
 
@@ -467,7 +421,7 @@ fn test_usb_sysctl_register(
     let mut buf = [0u8; 1];
 
     // 1) Read original value
-    let n = rtl_get_usb_reg(handle, USB_SYSCTL_0, &mut buf)?;
+    let n = rtl_get_usb_reg(handle, constants::USB_SYSCTL_0, &mut buf)?;
     if n != 1 {
         println!(
             "Unexpected read length from USB_SYSCTL_0: {} bytes (expected 1)",
@@ -478,7 +432,7 @@ fn test_usb_sysctl_register(
     println!("  Original USB_SYSCTL_0 value: 0x{:02x}", original);
 
     // 2) Write the same value back (safe "no-op" write)
-    let written = rtl_set_usb_reg(handle, USB_SYSCTL_0, &[original])?;
+    let written = rtl_set_usb_reg(handle, constants::USB_SYSCTL_0, &[original])?;
     if written != 1 {
         println!(
             "  Warning: wrote {} bytes back to USB_SYSCTL_0 (expected 1)",
@@ -489,7 +443,7 @@ fn test_usb_sysctl_register(
     }
 
     // 3) Read again to confirm the transfer path works
-    let n2 = rtl_get_usb_reg(handle, USB_SYSCTL_0, &mut buf)?;
+    let n2 = rtl_get_usb_reg(handle, constants::USB_SYSCTL_0, &mut buf)?;
     let readback = buf[0];
     println!(
         "  Readback USB_SYSCTL_0 value: 0x{:02x} ({} bytes)",
@@ -506,60 +460,60 @@ fn test_demod_register(
 ) -> Result<(), rusb::Error> {
     println!(
         "Testing demod vendor-specific control transfers (page=0x{:02x}, addr=0x{:04x})...",
-        DEMOD_PAGE_SYS,
-        DEMOD_REG_SYS_TEST,
+        constants::DEMOD_PAGE_SYS,
+        constants::DEMOD_REG_SYS_TEST,
     );
 
     let mut buf = [0u8; 1];
 
     // 1) Read original value
-    let n = rtl_get_demod_reg(handle, DEMOD_PAGE_SYS, DEMOD_REG_SYS_TEST, &mut buf)?;
+    let n = rtl_get_demod_reg(handle, constants::DEMOD_PAGE_SYS, constants::DEMOD_REG_SYS_TEST, &mut buf)?;
     if n != 1 {
         println!(
             "  Unexpected read length from demod reg page=0x{:02x}, addr=0x{:04x}: {} bytes (expected 1)",
-            DEMOD_PAGE_SYS,
-            DEMOD_REG_SYS_TEST,
+            constants::DEMOD_PAGE_SYS,
+            constants::DEMOD_REG_SYS_TEST,
             n
         );
     }
     let original = buf[0];
     println!(
         "  Original DEMOD[page=0x{:02x}, addr=0x{:04x}] value: 0x{:02x}",
-        DEMOD_PAGE_SYS,
-        DEMOD_REG_SYS_TEST,
+        constants::DEMOD_PAGE_SYS,
+        constants::DEMOD_REG_SYS_TEST,
         original
     );
 
     // 2) Write the same value back (no-op)
     let written = rtl_set_demod_reg(
         handle,
-        DEMOD_PAGE_SYS,
-        DEMOD_REG_SYS_TEST,
+        constants::DEMOD_PAGE_SYS,
+        constants::DEMOD_REG_SYS_TEST,
         &[original],
     )?;
     if written != 1 {
         println!(
             "  Warning: wrote {} bytes to demod reg page=0x{:02x}, addr=0x{:04x} (expected 1)",
             written,
-            DEMOD_PAGE_SYS,
-            DEMOD_REG_SYS_TEST,
+            constants::DEMOD_PAGE_SYS,
+            constants::DEMOD_REG_SYS_TEST,
         );
     } else {
         println!(
             "  Wrote DEMOD[page=0x{:02x}, addr=0x{:04x}] back unchanged (0x{:02x})",
-            DEMOD_PAGE_SYS,
-            DEMOD_REG_SYS_TEST,
+            constants::DEMOD_PAGE_SYS,
+            constants::DEMOD_REG_SYS_TEST,
             original
         );
     }
 
     // 3) Read again
-    let n2 = rtl_get_demod_reg(handle, DEMOD_PAGE_SYS, DEMOD_REG_SYS_TEST, &mut buf)?;
+    let n2 = rtl_get_demod_reg(handle, constants::DEMOD_PAGE_SYS, constants::DEMOD_REG_SYS_TEST, &mut buf)?;
     let readback = buf[0];
     println!(
         "  Readback DEMOD[page=0x{:02x}, addr=0x{:04x}] value: 0x{:02x} ({} bytes)",
-        DEMOD_PAGE_SYS,
-        DEMOD_REG_SYS_TEST,
+        constants::DEMOD_PAGE_SYS,
+        constants::DEMOD_REG_SYS_TEST,
         readback,
         n2
     );
@@ -588,12 +542,12 @@ fn rtl_write_reg(
     let index: u16 = ((block as u16) << 8) | 0x10;
 
     let written = handle.write_control(
-        CTRL_OUT,
+        constants::CTRL_OUT,
         0,              // bRequest
         addr,           // wValue = register address (e.g. 0x3000)
         index,          // wIndex = block << 8 | 0x10
         &data[..len as usize],
-        Duration::from_millis(CTRL_TIMEOUT_MS),
+        Duration::from_millis(constants::CTRL_TIMEOUT_MS),
     )?;
 
     if written != len as usize {
@@ -637,20 +591,20 @@ fn init_baseband(handle: &mut DeviceHandle<GlobalContext>) -> Result<(), rusb::E
 
     // --- initialize USB ---
     // rtlsdr_write_reg(dev, USBB, USB_SYSCTL, 0x09, 1);
-    rtl_write_reg(handle, BLOCK_USBB, USB_SYSCTL_0, 0x0009, 1)?;
+    rtl_write_reg(handle, constants::BLOCK_USBB, constants::USB_SYSCTL_0, 0x0009, 1)?;
 
     // rtlsdr_write_reg(dev, USBB, USB_EPA_MAXPKT, 0x0002, 2);
-    rtl_write_reg(handle, BLOCK_USBB, USB_EPA_MAXPKT, 0x0002, 2)?;
+    rtl_write_reg(handle, constants::BLOCK_USBB, constants::USB_EPA_MAXPKT, 0x0002, 2)?;
 
-    // rtlsdr_write_reg(dev, USBB, USB_EPA_CTL, 0x1002, 2);
-    rtl_write_reg(handle, BLOCK_USBB, USB_EPA_CTL, 0x1002, 2)?;
+    // rtlsdr_write_reg(dev, USBB, constants::USB_EPA_CTL, 0x1002, 2);
+    rtl_write_reg(handle, constants::BLOCK_USBB, constants::USB_EPA_CTL, 0x1002, 2)?;
 
     // --- power on demod ---
     // rtlsdr_write_reg(dev, SYSB, DEMOD_CTL_1, 0x22, 1);
-    rtl_write_reg(handle, BLOCK_SYSB, DEMOD_CTL_1, 0x0022, 1)?;
+    rtl_write_reg(handle, constants::BLOCK_SYSB, constants::DEMOD_CTL_1, 0x0022, 1)?;
 
     // rtlsdr_write_reg(dev, SYSB, DEMOD_CTL, 0xe8, 1);
-    rtl_write_reg(handle, BLOCK_SYSB, DEMOD_CTL, 0x00e8, 1)?;
+    rtl_write_reg(handle, constants::BLOCK_SYSB, constants::DEMOD_CTL, 0x00e8, 1)?;
 
     // --- reset demod (bit 3, soft_rst) ---
     // rtlsdr_demod_write_reg(dev, 1, 0x01, 0x14, 1);
@@ -728,10 +682,10 @@ fn rtl_reset_buffer(handle: &mut DeviceHandle<GlobalContext>) -> Result<(), rusb
     println!("Resetting RTL2832U USB FIFO/buffer...");
 
     // Match rtlsdr_reset_buffer(dev) from librtlsdr.c:
-    //   rtlsdr_write_reg(dev, USBB, USB_EPA_CTL, 0x1002, 2);
-    //   rtlsdr_write_reg(dev, USBB, USB_EPA_CTL, 0x0000, 2);
-    rtl_write_reg(handle, BLOCK_USBB, USB_EPA_CTL, 0x1002, 2)?;
-    rtl_write_reg(handle, BLOCK_USBB, USB_EPA_CTL, 0x0000, 2)?;
+    //   rtlsdr_write_reg(dev, USBB, constants::USB_EPA_CTL, 0x1002, 2);
+    //   rtlsdr_write_reg(dev, USBB, constants::USB_EPA_CTL, 0x0000, 2);
+    rtl_write_reg(handle, constants::BLOCK_USBB, constants::USB_EPA_CTL, 0x1002, 2)?;
+    rtl_write_reg(handle, constants::BLOCK_USBB, constants::USB_EPA_CTL, 0x0000, 2)?;
 
     Ok(())
 }
@@ -850,10 +804,10 @@ fn rtl_set_fir(handle: &mut DeviceHandle<GlobalContext>) -> Result<(), rusb::Err
 
     // format: int8_t[8]
     for i in 0..8 {
-        let val = FIR_DEFAULT[i];
+        let val = constants::FIR_DEFAULT[i];
         // Sanity check like librtlsdr does
         if val < -128 || val > 127 {
-            eprintln!("FIR_DEFAULT[{}] out of int8_t range: {}", i, val);
+            eprintln!("constants::FIR_DEFAULT[{}] out of int8_t range: {}", i, val);
             return Ok(()); // don't crash; just skip if somehow broken
         }
         fir_bytes[i] = val as i8 as u8;
@@ -866,12 +820,12 @@ fn rtl_set_fir(handle: &mut DeviceHandle<GlobalContext>) -> Result<(), rusb::Err
     // fir[8 + i*3/2 + 2] = val1;
     //
     for i in (0..8).step_by(2) {
-        let val0 = FIR_DEFAULT[8 + i];
-        let val1 = FIR_DEFAULT[8 + i + 1];
+        let val0 = constants::FIR_DEFAULT[8 + i];
+        let val1 = constants::FIR_DEFAULT[8 + i + 1];
 
         if val0 < -2048 || val0 > 2047 || val1 < -2048 || val1 > 2047 {
             eprintln!(
-                "FIR_DEFAULT 12-bit taps out of range: i={}, val0={}, val1={}",
+                "constants::FIR_DEFAULT 12-bit taps out of range: i={}, val0={}, val1={}",
                 i, val0, val1
             );
             return Ok(());
