@@ -408,6 +408,18 @@ fn rtl_set_demod_reg(
     )
 }
 
+fn dump_demod_i2cmcr_page1(
+    handle: &mut DeviceHandle<GlobalContext>,
+) -> Result<(), Error> {
+    let mut buf = [0u8; 4];
+    let n = rtl_demod_read_reg(handle, 1, 0x0044, &mut buf)?;
+    if n != 4 {
+        eprintln!("dump_demod_i2cmcr_page1: expected 4 bytes, got {}", n);
+    }
+    let val = u32::from_le_bytes(buf);
+    println!("DEM I2CMCR (page=1, addr=0x0044) = 0x{:08x}", val);
+    Ok(())
+}
 
 
 /// Test that we can read and write a known USB register (USB_SYSCTL[7:0]).
@@ -898,17 +910,34 @@ fn configure_for_adsb_1090mhz(
     }
 
     // 2) Program I2C clock to datasheet default (FD10 = 0x13 => internal ~10 MHz).
-    if let Err(e) = rtl_write_reg(
-        handle,
-        constants::BLOCK_SYSB,
-        constants::SYS_I2CCR,
-        0x0013,
-        1,
-    ) {
-        eprintln!("  Failed to program SYS I2C clock (SYS_I2CCR): {:?}", e);
-    } else {
-        println!("  SYS I2C clock (SYS_I2CCR) set to FD10=0x13.");
+    match set_sys_i2c_clock_10mhz(handle) {
+        Ok(()) => {
+            let fd10 = read_sys_i2c_clock_fd10(handle).unwrap_or(0xff);
+            println!(
+                "  SYS I2C clock (SYS_I2CCR) FD10 set to 0x{:02x} (datasheet 10MHz recommendation).",
+                fd10
+            );
+        }
+        Err(e) => {
+            eprintln!("  Failed to program SYS I2C clock (SYS_I2CCR): {:?}", e);
+        }
     }
+
+    // 2b) Initialize I2C Master Control for simple single-shot transfers.
+    if let Err(e) = dump_demod_i2cmcr_page1(handle) {
+    eprintln!("  dump_demod_i2cmcr_page1 (before) failed: {:?}", e);
+    }
+
+    if let Err(e) = init_sys_i2c_master_simple(handle) {
+        eprintln!("  init_sys_i2c_master_simple failed: {:?}", e);
+    } else {
+        println!("  I2C Master Control (I2CMCR) initialized for simple single-shot mode.");
+    }
+
+    if let Err(e) = dump_demod_i2cmcr_page1(handle) {
+        eprintln!("  dump_demod_i2cmcr_page1 (after) failed: {:?}", e);
+    }
+
 
     // 3) Try a few common tuner I2C addresses and read reg 0x00 as a "chip ID" probe.
     const CANDIDATE_ADDRS: [u8; 4] = [0x34, 0x35, 0x36, 0x38];
@@ -948,6 +977,11 @@ fn configure_for_adsb_1090mhz(
             eprintln!("  test_tuner_reg_roundtrip failed: {:?}", e);
         }
         
+        // New: test I2C master-based write to the tuner.
+        if let Err(e) = test_tuner_write_via_i2c_master(handle, 0x05) {
+            eprintln!("  test_tuner_write_via_i2c_master failed: {:?}", e);
+        }
+
         
         // Try to apply 1090 MHz profile, if any.
         if let Err(e) = tuner_set_1090mhz(handle) {
@@ -1220,6 +1254,410 @@ fn tuner_set_1090mhz(
     }
 
     println!("tuner_set_1090mhz: done programming tuner registers.");
+    Ok(())
+}
+
+/// Write a single R82xx tuner register using the generic I2C master.
+///
+/// This sends:
+///   [TUNER_I2C_ADDR (write), reg, value]
+fn tuner_write_reg_i2c_master(
+    handle: &mut DeviceHandle<GlobalContext>,
+    reg: u8,
+    value: u8,
+) -> Result<(), Error> {
+    // data bytes after address: [reg, value]
+    let data = [reg, value];
+    rtl_i2c_write(handle, constants::TUNER_I2C_ADDR, &data)
+}
+
+
+/// Read the low byte of SYS_I2CCR (I2C Clock Register).
+fn read_sys_i2c_clock_fd10(
+    handle: &mut DeviceHandle<GlobalContext>,
+) -> Result<u8, rusb::Error> {
+    let mut buf = [0u8; 1];
+    let n = rtl_read_reg(handle, constants::BLOCK_SYSB, constants::SYS_I2CCR, &mut buf)?;
+    if n != 1 {
+        eprintln!(
+            "read_sys_i2c_clock_fd10: expected 1 byte, got {}",
+            n
+        );
+    }
+    Ok(buf[0] & constants::SYS_I2CCR_FD10_MASK)
+}
+
+/// Set FD10 in SYS_I2CCR to a specific value (low 6 bits).
+/// This does a read-modify-write of the low byte, preserving reserved bits.
+fn write_sys_i2c_clock_fd10(
+    handle: &mut DeviceHandle<GlobalContext>,
+    fd10: u8,
+) -> Result<(), rusb::Error> {
+    let fd10 = fd10 & constants::SYS_I2CCR_FD10_MASK;
+    if fd10 == 0 {
+        eprintln!("write_sys_i2c_clock_fd10: fd10=0 is forbidden; using 1 instead.");
+    }
+
+    // Read current low byte.
+    let mut buf = [0u8; 1];
+    let n = rtl_read_reg(handle, constants::BLOCK_SYSB, constants::SYS_I2CCR, &mut buf)?;
+    if n != 1 {
+        eprintln!(
+            "write_sys_i2c_clock_fd10: expected 1 byte, got {}",
+            n
+        );
+    }
+
+    // Preserve upper bits of the byte, replace bits [5:0].
+    let current = buf[0];
+    let new_val = (current & !constants::SYS_I2CCR_FD10_MASK) | fd10;
+
+    // Write back one byte (low byte of the register).
+    rtl_write_reg(
+        handle,
+        constants::BLOCK_SYSB,
+        constants::SYS_I2CCR,
+        new_val as u16,
+        1,
+    )?;
+
+    Ok(())
+}
+
+
+
+/// Convenience helper: set SYS I2C clock to the datasheet's 10 MHz recommendation.
+fn set_sys_i2c_clock_10mhz(
+    handle: &mut DeviceHandle<GlobalContext>,
+) -> Result<(), rusb::Error> {
+    write_sys_i2c_clock_fd10(handle, constants::SYS_I2CCR_FD10_10MHZ)
+}
+
+/// Configure I2C Master Control (I2CMCR) for a simple single-shot transaction model:
+/// - No repeat starts (RSC = 0).
+/// - Default time-out enabled (TORE = 1, TOR = 0x3A).
+/// - ACK checking enabled for first/second bytes (FBAIFD = SBAIFD = 0).
+/// - Interrupts enabled (TEIE/MRCIE/MTCIE = 1) so status bits update; we'll still poll.
+/// Note: We do *not* set CS or IMUR here; those are for kick-off/reset.
+fn init_sys_i2c_master_simple(
+    handle: &mut DeviceHandle<GlobalContext>,
+) -> rusb::Result<()> {
+    let mut val: u32 = 0;
+
+    // Enable time-out logic.
+    val |= constants::I2CMCR_TORE;
+    // TOR default (0x3A)
+    val |= constants::I2CMCR_TOR_DEFAULT;
+
+    // Enable interrupt flags so I2CMSR bits actually update.
+    val |= constants::I2CMCR_TEIE | constants::I2CMCR_MRCIE | constants::I2CMCR_MTCIE;
+
+    // All other bits default to 0:
+    // - IMUR=0 (no reset)
+    // - CS=0 (not started)
+    // - RWL=0 (we'll set per-transaction)
+    // - RSC=0, FRSIB/SRSIB=0 (no repeat starts)
+    // - FBAIFD/SBAIFD=0 (check ACK)
+    // - TEIE/MRCIE/MTCIE now enabled above.
+
+    let bytes = val.to_le_bytes();
+
+    // Low 16 bits
+    let low = u16::from(bytes[0]) | (u16::from(bytes[1]) << 8);
+    rtl_write_reg(
+        handle,
+        constants::BLOCK_SYSB,
+        constants::SYS_I2CMCR,
+        low,
+        2,
+    )?;
+
+    // High 16 bits
+    let high = u16::from(bytes[2]) | (u16::from(bytes[3]) << 8);
+    rtl_write_reg(
+        handle,
+        constants::BLOCK_SYSB,
+        constants::SYS_I2CMCR.wrapping_add(2),
+        high,
+        2,
+    )?;
+
+    Ok(())
+}
+
+
+
+/// Read the low byte of SYS I2C Master Status (I2CMSR).
+/// Only bits [2:0] are currently defined (TEIF, MRCIF, MTCIF).
+fn read_sys_i2c_status(
+    handle: &mut DeviceHandle<GlobalContext>,
+) -> Result<u8, Error> {
+    let mut buf = [0u8; 1];
+    let n = rtl_read_reg(handle, constants::BLOCK_SYSB, constants::SYS_I2CMSR, &mut buf)?;
+    if n != 1 {
+        eprintln!(
+            "read_sys_i2c_status: expected 1 byte, got {}",
+            n
+        );
+    }
+    Ok(buf[0])
+}
+
+/// Clear selected I2C status flags in I2CMSR by writing '1' to those bits (W1C).
+///
+/// mask: combination of I2CMSR_TEIF, I2CMSR_MRCIF, I2CMSR_MTCIF.
+/// Only bits set to '1' in mask will be cleared (write-one-to-clear semantics).
+fn clear_sys_i2c_status_flags(
+    handle: &mut DeviceHandle<GlobalContext>,
+    mask: u8,
+) -> Result<(), Error> {
+    // We only ever touch bits [2:0]; higher bits are reserved.
+    let to_clear = mask & constants::I2CMSR_ALL_FLAGS;
+
+    if to_clear == 0 {
+        // Nothing to do.
+        return Ok(());
+    }
+
+    // W1C semantics: writing '1' to a bit clears it, '0' leaves it unchanged.
+    rtl_write_reg(
+        handle,
+        constants::BLOCK_SYSB,
+        constants::SYS_I2CMSR,
+        to_clear as u16,
+        1,
+    )?;
+
+    Ok(())
+}
+
+/// Write one data byte into the SYS I2C Master FIFO/Data register (I2CMFR.TDD).
+/// This is used to queue bytes for transmission (slave address, register index, data...).
+fn sys_i2c_write_data_byte(
+    handle: &mut DeviceHandle<GlobalContext>,
+    byte: u8,
+) -> Result<(), Error> {
+    rtl_write_reg(
+        handle,
+        constants::BLOCK_SYSB,
+        constants::SYS_I2CMFR,
+        byte as u16,
+        1,
+    )?;
+    Ok(())
+}
+
+/// Read one data byte from the SYS I2C Master FIFO/Data register (I2CMFR.TDD).
+/// After a receive transaction, this returns one byte from the target device.
+fn sys_i2c_read_data_byte(
+    handle: &mut DeviceHandle<GlobalContext>,
+) -> Result<u8, Error> {
+    let mut buf = [0u8; 1];
+    let n = rtl_read_reg(
+        handle,
+        constants::BLOCK_SYSB,
+        constants::SYS_I2CMFR,
+        &mut buf,
+    )?;
+    if n != 1 {
+        eprintln!(
+            "sys_i2c_read_data_byte: expected 1 byte, got {}",
+            n
+        );
+    }
+    Ok(buf[0] & constants::I2CMFR_TDD_MASK)
+}
+
+/// Perform a simple I2C write transaction using the RTL2832U's I2C master.
+///
+/// This sends:
+///   [addr_8bit, data[0], data[1], ...]
+///
+/// - `addr_8bit` is the full 8-bit I2C address (7-bit address << 1 | R/Wbit),
+///   e.g. 0x34 for an R820T tuner write.
+/// - `data` are the bytes following the address on the bus (typically register
+///   index + one or more data bytes).
+///
+/// Constraints:
+///   - data.len() must be in [1, 24] (RWL encoding 0..17 => 1..24 bytes).
+///   - IIC_repeat must already be enabled so the tuner sees the traffic.
+///   - I2C clock and master control should already be initialized.
+fn rtl_i2c_write(
+    handle: &mut DeviceHandle<GlobalContext>,
+    addr_8bit: u8,
+    data: &[u8],
+) -> Result<(), Error> {
+    if data.is_empty() {
+        eprintln!("rtl_i2c_write: data buffer is empty; nothing to send.");
+        return Ok(());
+    }
+    if data.len() > 24 {
+        eprintln!(
+            "rtl_i2c_write: data length {} too large (max 24 bytes).",
+            data.len()
+        );
+        return Err(Error::Other);
+    }
+
+    // 1) Clear any old status flags (MTCIF/MRCIF/TEIF).
+    clear_sys_i2c_status_flags(handle, constants::I2CMSR_ALL_FLAGS)?;
+
+    // 2) Write the address byte, then all data bytes, into the FIFO.
+    sys_i2c_write_data_byte(handle, addr_8bit)?;
+    for &b in data {
+        sys_i2c_write_data_byte(handle, b)?;
+    }
+
+    // 3) Program RWL = data.len() - 1 (does NOT include address byte).
+    //
+    //    From your I2CMCR table:
+    //      - RWL encodes data length: 0 => 1 byte ... 17 => 24 bytes.
+    //      - "Does not include the slave address byte in the FIFO register."
+    //
+    //    So for N data bytes we set RWL = N-1.
+    let rwl_val: u32 = (data.len() as u32 - 1) & 0x1F;
+
+    let mut i2cmcr_bytes = [0u8; 4];
+    let n = rtl_read_reg(
+        handle,
+        constants::BLOCK_SYSB,
+        constants::SYS_I2CMCR,
+        &mut i2cmcr_bytes,
+    )?;
+    if n != 4 {
+        eprintln!(
+            "rtl_i2c_write: expected to read 4 bytes from I2CMCR, got {}",
+            n
+        );
+    }
+    let mut i2cmcr_val = u32::from_le_bytes(i2cmcr_bytes);
+
+    println!(
+        "rtl_i2c_write: I2CMCR before RWL/CS update = 0x{:08x}",
+        i2cmcr_val
+    );
+
+    // Clear old RWL and insert new.
+    i2cmcr_val &= !constants::I2CMCR_RWL_MASK;
+    i2cmcr_val |= (rwl_val << constants::I2CMCR_RWL_SHIFT) & constants::I2CMCR_RWL_MASK;
+
+    // 4) Set CS=1 (Command Start) to kick off the transaction.
+    i2cmcr_val |= constants::I2CMCR_CS;
+
+    println!(
+        "rtl_i2c_write: I2CMCR after RWL/CS update = 0x{:08x}",
+        i2cmcr_val
+    );
+
+    let new_bytes = i2cmcr_val.to_le_bytes();
+
+    // Write back full 32-bit I2CMCR as two 16-bit words.
+    let low = u16::from(new_bytes[0]) | (u16::from(new_bytes[1]) << 8);
+    rtl_write_reg(
+        handle,
+        constants::BLOCK_SYSB,
+        constants::SYS_I2CMCR,
+        low,
+        2,
+    )?;
+    let high = u16::from(new_bytes[2]) | (u16::from(new_bytes[3]) << 8);
+    rtl_write_reg(
+        handle,
+        constants::BLOCK_SYSB,
+        constants::SYS_I2CMCR.wrapping_add(2),
+        high,
+        2,
+    )?;
+
+    // 5) Poll I2CMSR for completion or error.
+    const MAX_POLLS: usize = 1000;
+    for i in 0..MAX_POLLS {
+        let status = read_sys_i2c_status(handle)?;
+
+        if status != 0 {
+            println!(
+                "rtl_i2c_write: poll {}: I2CMSR = 0x{:02x}",
+                i, status
+            );
+        }
+
+        let has_error = (status & constants::I2CMSR_TEIF) != 0;
+        let tx_done  = (status & constants::I2CMSR_MTCIF) != 0;
+        let rx_done  = (status & constants::I2CMSR_MRCIF) != 0;
+
+        if has_error {
+            eprintln!(
+                "rtl_i2c_write: I2C Transaction Error (I2CMSR=0x{:02x})",
+                status
+            );
+            clear_sys_i2c_status_flags(handle, constants::I2CMSR_ALL_FLAGS)?;
+            return Err(Error::Other);
+        }
+
+        if tx_done || rx_done {
+            // Clear completion flag(s) and return success.
+            clear_sys_i2c_status_flags(
+                handle,
+                constants::I2CMSR_MTCIF | constants::I2CMSR_MRCIF,
+            )?;
+            println!(
+                "rtl_i2c_write: transaction complete (status=0x{:02x}, tx_done={}, rx_done={})",
+                status, tx_done, rx_done
+            );
+            return Ok(());
+        }
+    }
+
+    eprintln!("rtl_i2c_write: timed out waiting for I2C transaction to complete.");
+    // Best-effort clean-up.
+    clear_sys_i2c_status_flags(handle, constants::I2CMSR_ALL_FLAGS)?;
+    Err(Error::Timeout)
+}
+
+
+
+/// Test writing a tuner register via the generic I2C master.
+/// We:
+///   1) Read the current value using the old vendor GetTunReg path.
+///   2) Write the same value back using the generic I2C master.
+///   3) Read again (vendor path) and print both values.
+///
+/// This won’t reveal the true tuner register map yet (GetTunReg is limited),
+/// but it will confirm that the I2C master transaction completes without TEIF.
+fn test_tuner_write_via_i2c_master(
+    handle: &mut DeviceHandle<GlobalContext>,
+    reg: u8,
+) -> Result<(), Error> {
+    println!(
+        "Testing tuner write via I2C master at addr=0x{:02x}, reg=0x{:02x}…",
+        constants::TUNER_I2C_ADDR,
+        reg
+    );
+
+    // 1) Read current value via old vendor helper.
+    let v1 = rtl_read_tuner_reg_byte(handle, constants::TUNER_I2C_ADDR, reg)?;
+    println!("  (vendor) initial TUNER[0x{:02x}] = 0x{:02x}", reg, v1);
+
+    // 2) Write same value back via I2C master.
+    tuner_write_reg_i2c_master(handle, reg, v1)?;
+    println!(
+        "  (i2c_master) wrote same value back to TUNER[0x{:02x}] (0x{:02x})",
+        reg, v1
+    );
+
+    // 3) Read again via vendor helper.
+    let v2 = rtl_read_tuner_reg_byte(handle, constants::TUNER_I2C_ADDR, reg)?;
+    println!("  (vendor) after I2C master write, TUNER[0x{:02x}] = 0x{:02x}", reg, v2);
+
+    if v1 == v2 {
+        println!("  Tuner I2C master write test: values match (v1 == v2).");
+    } else {
+        println!(
+            "  Tuner I2C master write test: MISMATCH (v1=0x{:02x}, v2=0x{:02x}).",
+            v1, v2
+        );
+    }
+
     Ok(())
 }
 
