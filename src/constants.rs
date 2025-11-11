@@ -170,4 +170,5 @@ pub const I2CMSR_ALL_FLAGS: u8 = I2CMSR_TEIF | I2CMSR_MRCIF | I2CMSR_MTCIF;
 // Bits 7:0 = TDD (Target Device Data). Read for receive.
 // Bits 31:8 reserved.
 pub const I2CMFR_TDD_MASK: u8 = 0xFF;
+pub const BLOCK_IICB: u8 = 6; // matches librtlsdr enum blocks
 

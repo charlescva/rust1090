@@ -1000,6 +1000,13 @@ fn configure_for_adsb_1090mhz(
             "  Detected tuner at I2C addr 0x{:02x}, reg 0x00 = 0x{:02x} (likely R820T/R828D).",
             0x34, 0x69
         );
+        
+        if let Some(addr) = detected_tuner_addr {
+            if let Err(e) = test_tuner_i2c_block_path(handle, addr) {
+                eprintln!("  test_tuner_i2c_block_path failed: {:?}", e);
+            }
+        }
+
 
         // Quick write/readback test on some register. We'll use 0x05 arbitrarily;
         // if it's read-only, the write is ignored, which is still harmless.
@@ -1644,8 +1651,6 @@ fn rtl_i2c_write(
     Err(Error::Timeout)
 }
 
-
-
 /// Test writing a tuner register via the generic I2C master.
 /// We:
 ///   1) Read the current value using the old vendor GetTunReg path.
@@ -1685,6 +1690,135 @@ fn test_tuner_write_via_i2c_master(
         println!(
             "  Tuner I2C master write test: MISMATCH (v1=0x{:02x}, v2=0x{:02x}).",
             v1, v2
+        );
+    }
+
+    Ok(())
+}
+fn rtl_read_array(
+    handle: &mut DeviceHandle<GlobalContext>,
+    block: u8,
+    addr: u16,
+    buf: &mut [u8],
+) -> Result<usize, Error> {
+    let mut index: u16 = (block as u16) << 8;
+
+    // Special-case IRB as in librtlsdr
+    if block == constants::BLOCK_IRB {
+        index = ((constants::BLOCK_SYSB as u16) << 8) | 0x01;
+    }
+
+    handle.read_control(
+        constants::CTRL_IN,
+        0,          // bRequest
+        addr,       // wValue = I2C slave addr for IICB
+        index,      // wIndex = (block << 8) | maybe tag
+        buf,
+        Duration::from_millis(constants::CTRL_TIMEOUT_MS),
+    )
+}
+
+fn rtl_write_array(
+    handle: &mut DeviceHandle<GlobalContext>,
+    block: u8,
+    addr: u16,
+    data: &[u8],
+) -> Result<usize, Error> {
+    let mut index: u16 = ((block as u16) << 8) | 0x10;
+
+    // Special-case IRB as in librtlsdr
+    if block == constants::BLOCK_IRB {
+        index = ((constants::BLOCK_SYSB as u16) << 8) | 0x11;
+    }
+
+    handle.write_control(
+        constants::CTRL_OUT,
+        0,          // bRequest
+        addr,       // wValue = I2C slave addr for IICB
+        index,      // wIndex = (block << 8) | 0x10 (or IR-tag)
+        data,
+        Duration::from_millis(constants::CTRL_TIMEOUT_MS),
+    )
+}
+/// Low-level tuner I2C write via IICB block (matches rtlsdr_i2c_write_reg).
+fn rtl_tuner_i2c_write_reg_iicb(
+    handle: &mut DeviceHandle<GlobalContext>,
+    i2c_addr: u8,
+    reg: u8,
+    val: u8,
+) -> Result<(), Error> {
+    let addr = i2c_addr as u16;
+    let data = [reg, val];
+    let written = rtl_write_array(handle, constants::BLOCK_IICB, addr, &data)?;
+    if written != data.len() {
+        eprintln!(
+            "rtl_tuner_i2c_write_reg_iicb: wrote {} bytes (expected {})",
+            written,
+            data.len()
+        );
+    }
+    Ok(())
+}
+
+/// Low-level tuner I2C read via IICB block (matches rtlsdr_i2c_read_reg).
+fn rtl_tuner_i2c_read_reg_iicb(
+    handle: &mut DeviceHandle<GlobalContext>,
+    i2c_addr: u8,
+    reg: u8,
+) -> Result<u8, Error> {
+    let addr = i2c_addr as u16;
+
+    // First write the register index
+    let reg_buf = [reg];
+    let written = rtl_write_array(handle, constants::BLOCK_IICB, addr, &reg_buf)?;
+    if written != reg_buf.len() {
+        eprintln!(
+            "rtl_tuner_i2c_read_reg_iicb: wrote {} bytes of reg index (expected {})",
+            written,
+            reg_buf.len()
+        );
+    }
+
+    // Now read one byte back
+    let mut data = [0u8; 1];
+    let read = rtl_read_array(handle, constants::BLOCK_IICB, addr, &mut data)?;
+    if read != 1 {
+        eprintln!(
+            "rtl_tuner_i2c_read_reg_iicb: read {} bytes (expected 1)",
+            read
+        );
+    }
+
+    Ok(data[0])
+}
+fn test_tuner_i2c_block_path(
+    handle: &mut DeviceHandle<GlobalContext>,
+    tuner_addr: u8,
+) -> Result<(), Error> {
+    println!(
+        "Testing tuner I2C via IICB block at addr=0x{:02x}, reg=0x00…",
+        tuner_addr
+    );
+
+    // Read reg 0x00 via new path
+    let v0 = rtl_tuner_i2c_read_reg_iicb(handle, tuner_addr, 0x00)?;
+    println!(
+        "  (IICB) TUNER[0x00] = 0x{:02x} (this should be 0x69 for R820T/R828D)",
+        v0
+    );
+
+    // Maybe also compare with your existing vendor-based `rtl_get_tuner_reg`
+    let mut buf = [0u8; 1];
+    let n = rtl_get_tuner_reg(handle, tuner_addr, 0x00, &mut buf)?;
+    if n == 1 {
+        println!(
+            "  (vendor) TUNER[0x00] = 0x{:02x} (via GetTunReg)",
+            buf[0]
+        );
+    } else {
+        println!(
+            "  (vendor) rtl_get_tuner_reg read {} bytes for reg 0x00",
+            n
         );
     }
 
