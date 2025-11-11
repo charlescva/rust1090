@@ -942,6 +942,18 @@ fn configure_for_adsb_1090mhz(
             0x34, 0x69
         );
 
+        // Quick write/readback test on some register. We'll use 0x05 arbitrarily;
+        // if it's read-only, the write is ignored, which is still harmless.
+        if let Err(e) = test_tuner_reg_roundtrip(handle, constants::TUNER_I2C_ADDR, 0x05) {
+            eprintln!("  test_tuner_reg_roundtrip failed: {:?}", e);
+        }
+        
+        
+        // Try to apply 1090 MHz profile, if any.
+        if let Err(e) = tuner_set_1090mhz(handle) {
+            eprintln!("  tuner_set_1090mhz failed: {:?}", e);
+        }
+
         println!(
             "Dumping first 0x20 tuner registers at TUNER_I2C_ADDR=0x{:02x}…",
             constants::TUNER_I2C_ADDR
@@ -950,7 +962,7 @@ fn configure_for_adsb_1090mhz(
             eprintln!(" dump_tuner_registers failed: {:?}", e);
         }
     }
-    
+
     println!("  Tuner probe complete (see values above).");
     Ok(())
 }
@@ -1141,6 +1153,73 @@ fn dump_tuner_registers(
         reg = reg.wrapping_add(1);
     }
 
+    Ok(())
+}
+/// Test that we can write and then read back a tuner register.
+///
+/// This does:
+///   1) Read current value at (i2c_addr, reg)
+///   2) Write the same value back
+///   3) Read again and print both
+fn test_tuner_reg_roundtrip(
+    handle: &mut DeviceHandle<GlobalContext>,
+    i2c_addr: u8,
+    reg: u8,
+) -> rusb::Result<()> {
+    println!(
+        "Testing tuner register roundtrip at addr=0x{:02x}, reg=0x{:02x}…",
+        i2c_addr, reg
+    );
+
+    let v1 = rtl_read_tuner_reg_byte(handle, i2c_addr, reg)?;
+    println!("  Initial TUNER[0x{:02x}] = 0x{:02x}", reg, v1);
+
+    rtl_write_tuner_reg_byte(handle, i2c_addr, reg, v1)?;
+    println!("  Wrote same value back to TUNER[0x{:02x}] (0x{:02x})", reg, v1);
+
+    let v2 = rtl_read_tuner_reg_byte(handle, i2c_addr, reg)?;
+    println!("  After writeback, TUNER[0x{:02x}] = 0x{:02x}", reg, v2);
+
+    if v1 == v2 {
+        println!("  Roundtrip OK (v1 == v2).");
+    } else {
+        println!("  Roundtrip MISMATCH (v1=0x{:02x}, v2=0x{:02x})", v1, v2);
+    }
+
+    Ok(())
+}
+/// Program the R82xx tuner to (approximately) 1090 MHz using a known-good profile.
+///
+/// This function assumes:
+///   - TUNER_I2C_ADDR is the base tuner I2C address (0x34).
+///   - R82XX_1090MHZ_PROFILE contains a list of (reg, value) pairs that set
+///     the PLL, band, and filters appropriately for 1090 MHz.
+fn tuner_set_1090mhz(
+    handle: &mut DeviceHandle<GlobalContext>,
+) -> rusb::Result<()> {
+    if constants::R82XX_1090MHZ_PROFILE.is_empty() {
+        println!(
+            "tuner_set_1090mhz: R82XX_1090MHZ_PROFILE is empty; \
+             no tuner registers being programmed yet."
+        );
+        return Ok(());
+    }
+
+    println!(
+        "tuner_set_1090mhz: programming {} tuner register(s) at I2C addr 0x{:02x}…",
+        constants::R82XX_1090MHZ_PROFILE.len(),
+        constants::TUNER_I2C_ADDR
+    );
+
+    for &(reg, val) in constants::R82XX_1090MHZ_PROFILE {
+        println!(
+            "  TUNER[0x{:02x}] := 0x{:02x}",
+            reg, val
+        );
+        rtl_write_tuner_reg_byte(handle, constants::TUNER_I2C_ADDR, reg, val)?;
+    }
+
+    println!("tuner_set_1090mhz: done programming tuner registers.");
     Ok(())
 }
 

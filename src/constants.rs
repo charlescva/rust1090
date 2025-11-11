@@ -1,6 +1,20 @@
 // src/pub constants.rs
 // Note the pub keyword, which makes the constants public and accessible from other modules.
 
+/// Hard-coded R82xx tuner register values for 1090 MHz (to be filled in by you).
+///
+/// This is intentionally left with placeholder values; you can populate it by:
+///   1) Tuning the dongle to 1090 MHz with a known-good tool (rtl_sdr/rtl_test).
+///   2) Running this Rust program (with only GetTunReg) to dump tuner regs.
+///   3) Copying the relevant (reg, value) pairs here.
+///
+/// For now, we leave it empty or with dummy entries so the code compiles.
+pub const R82XX_1090MHZ_PROFILE: &[(u8, u8)] = &[
+    // (reg, value) pairs go here, e.g.:
+    // (0x05, 0x??),
+    // (0x06, 0x??),
+    // ...
+];
 
 
 pub const RTL_VID: u16 = 0x0bda;
