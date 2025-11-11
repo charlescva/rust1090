@@ -93,7 +93,7 @@ fn run() -> rusb::Result<()> {
     }
 
     // enable internal test mode (8-bit counter stream)
-    if let Err(e) = rtl_set_testmode(&mut handle, false) {
+    if let Err(e) = rtl_set_testmode(&mut handle, constants::TEST_MODE) {
         eprintln!("rtl_set_testmode failed: {:?}", e);
     }
     
@@ -521,6 +521,29 @@ fn test_demod_register(
     Ok(())
 }
 
+/// Generic helper to read from USB/SYS/TUN blocks via vendor command table.
+/// This complements `rtl_write_reg` and uses:
+///   wIndex = (block << 8) | 0x00   (GetUSBReg/GetSysReg/GetTunReg style)
+fn rtl_read_reg(
+    handle: &mut DeviceHandle<GlobalContext>,
+    block: u8,
+    addr: u16,
+    buf: &mut [u8],
+) -> Result<usize, Error> {
+    let index: u16 = ((block as u16) << 8) | 0x00;
+
+    handle.read_control(
+        constants::CTRL_IN,
+        0,          // bRequest
+        addr,       // wValue
+        index,      // wIndex = block << 8 | 0x00
+        buf,
+        Duration::from_millis(constants::CTRL_TIMEOUT_MS),
+    )
+}
+
+
+
 fn rtl_write_reg(
     handle: &mut DeviceHandle<GlobalContext>,
     block: u8,
@@ -856,32 +879,171 @@ fn rtl_set_fir(handle: &mut DeviceHandle<GlobalContext>) -> Result<(), rusb::Err
     Ok(())
 }
 
-/// Configure the front-end for ADS-B reception around 1090 MHz.
+/// Configure the RF front-end for ADS-B @ 1090 MHz (early steps).
 ///
-/// NOTE: Right now this is just a structural placeholder:
-/// - It assumes an R820T/R820T2-style tuner connected via I²C.
-/// - The actual tuner programming (PLL setup, filters, etc.) still needs
-///   to be ported from tuner_r82xx.c in librtlsdr.
-/// Once that is done, this function should:
-///   1) Program the tuner to ADSB_CENTER_FREQ_HZ
-///   2) Optionally configure tuner IF bandwidth
-///   3) Ensure the demod's IF / DDC configuration matches (Zero-IF in our case)
+/// For now, this:
+///   - Enables the I2C repeater (IIC_repeat).
+///   - Programs a safe default I2C clock value into SYS_I2CCR.
+///   - Probes a few likely tuner I2C addresses and reads reg 0x00,
+///     printing out whatever we see (chip-ID-ish).
 fn configure_for_adsb_1090mhz(
     handle: &mut DeviceHandle<GlobalContext>,
 ) -> rusb::Result<()> {
+    println!("configure_for_adsb_1090mhz: enabling I2C repeater and probing tuner ID…");
+
+    // 1) Enable I2C repeater so the tuner actually sees I2C traffic.
+    if let Err(e) = set_iic_repeat(handle, true) {
+        eprintln!("  Failed to enable I2C repeater (IIC_repeat): {:?}", e);
+        // We continue anyway; reads will likely fail if this didn't work.
+    }
+
+    // 2) Program I2C clock to datasheet default (FD10 = 0x13 => internal ~10 MHz).
+    if let Err(e) = rtl_write_reg(
+        handle,
+        constants::BLOCK_SYSB,
+        constants::SYS_I2CCR,
+        0x0013,
+        1,
+    ) {
+        eprintln!("  Failed to program SYS I2C clock (SYS_I2CCR): {:?}", e);
+    } else {
+        println!("  SYS I2C clock (SYS_I2CCR) set to FD10=0x13.");
+    }
+
+    // 3) Try a few common tuner I2C addresses and read reg 0x00 as a "chip ID" probe.
+    const CANDIDATE_ADDRS: [u8; 4] = [0x34, 0x35, 0x36, 0x38];
+
+    println!("  Probing tuner I2C addresses for reg 0x00…");
+    let mut any_success = false;
+
+    for &addr in &CANDIDATE_ADDRS {
+        match rtl_read_tuner_reg_byte(handle, addr, 0x00) {
+            Ok(val) => {
+                any_success = true;
+                println!(
+                    "    Tuner probe: I2C addr 0x{:02x}, reg 0x00 -> 0x{:02x}",
+                    addr, val
+                );
+            }
+            Err(e) => {
+                println!(
+                    "    Tuner probe: I2C addr 0x{:02x}, reg 0x00 read failed: {:?}",
+                    addr, e
+                );
+            }
+        }
+    }
+
+    if !any_success {
+        eprintln!("  No tuner responded to reg 0x00 probe (yet).");
+    } else {
+        println!("  Tuner probe complete (see values above).");
+    }
+
+    Ok(())
+}
+
+
+/// IIC Repeat
+/// Why it's used: It ensures that no other device can interrupt the sequence, making combined read/write operations more reliable.
+/// Enable or disable the RTL2832U's I2C repeater towards the tuner.
+///
+/// Datasheet (Table 3, "I2C Repeater Register Table"):
+///   - Register Name: IIC_repeat
+///   - Page: 1
+///   - Offset: 0x01
+///   - Bits used: [3]
+///   - 1 = Enable repeater (tuner hears I2C traffic)
+///   - 0 = Disable repeater (tuner isolated)
+fn set_iic_repeat(
+    handle: &mut DeviceHandle<GlobalContext>,
+    enable: bool,
+) -> Result<(), rusb::Error> {
+    let page: u8 = 1;
+    let addr: u16 = 0x0001; // first byte of page 1
+
+    let mut buf = [0u8; 1];
+    let n = rtl_get_demod_reg(handle, page, addr, &mut buf)?;
+    if n != 1 {
+        eprintln!(
+            "set_iic_repeat: unexpected read length {}, expected 1",
+            n
+        );
+    }
+
+    let mut val = buf[0];
+    if enable {
+        val |= 1 << 3; // set bit 3
+    } else {
+        val &= !(1 << 3); // clear bit 3
+    }
+
+    let written = rtl_set_demod_reg(handle, page, addr, &[val])?;
+    if written != 1 {
+        eprintln!(
+            "set_iic_repeat: wrote {} bytes (expected 1) when updating IIC_repeat",
+            written
+        );
+    }
+
     println!(
-        "configure_for_adsb_1090mhz: tuner programming not yet implemented.\n\
-         The device is still using whatever RF center frequency the tuner\n\
-         powers up with (or what a previous tool like rtl_test configured)."
+        "I2C repeater (IIC_repeat) {}",
+        if enable { "ENABLED" } else { "DISABLED" }
     );
 
-    // When you port the tuner code, this is where you'll:
-    //   - Initialize the tuner (if not already done)
-    //   - Call a function like `r82xx_set_freq(handle, ADSB_CENTER_FREQ_HZ)`
-    //   - Possibly set tuner bandwidth (around a few MHz)
-    //
-    // For now, we just return Ok so the rest of the pipeline runs unchanged.
     Ok(())
+}
+
+
+/// Low-level tuner register read via the RTL2832U "GetTunReg" command.
+///
+/// From the datasheet vendor command table:
+///   bmRequestType = 0xC0
+///   bRequest      = 0
+///   wValue        = (OffsetAdd << 8) + IICAdd
+///   wIndex        = 0x0300  (tuner block)
+///   wLength       = buf.len()
+fn rtl_get_tuner_reg(
+    handle: &mut DeviceHandle<GlobalContext>,
+    i2c_addr: u8,
+    reg: u8,
+    buf: &mut [u8],
+) -> Result<usize, Error> {
+    let request_type = constants::CTRL_IN;
+    let request = 0u8;
+
+    // wValue = (OffsetAdd << 8) + IICAdd
+    let value: u16 = ((reg as u16) << 8) | (i2c_addr as u16);
+
+    // 0x0300 = GetTunReg (tuner block)
+    let index: u16 = 0x0300u16;
+
+    handle.read_control(
+        request_type,
+        request,
+        value,
+        index,
+        buf,
+        Duration::from_millis(constants::CTRL_TIMEOUT_MS),
+    )
+}
+
+
+/// Convenience wrapper: read exactly one tuner register byte.
+fn rtl_read_tuner_reg_byte(
+    handle: &mut DeviceHandle<GlobalContext>,
+    i2c_addr: u8,
+    reg: u8,
+) -> Result<u8, rusb::Error> {
+    let mut buf = [0u8; 1];
+    let n = rtl_get_tuner_reg(handle, i2c_addr, reg, &mut buf)?;
+    if n != 1 {
+        eprintln!(
+            "rtl_read_tuner_reg_byte: expected 1 byte, got {} (addr=0x{:02x}, reg=0x{:02x})",
+            n, i2c_addr, reg
+        );
+    }
+    Ok(buf[0])
 }
 
 
