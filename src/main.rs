@@ -408,19 +408,31 @@ fn rtl_set_demod_reg(
     )
 }
 
+/// Dump the 32-bit I2C Master Control register as seen in the DEMOD register map:
+/// page = 1, addr = 0x0044..0x0047 (I2CMCR 0044h–0047h in the datasheet).
 fn dump_demod_i2cmcr_page1(
     handle: &mut DeviceHandle<GlobalContext>,
+    label: &str,
 ) -> Result<(), Error> {
-    let mut buf = [0u8; 4];
-    let n = rtl_demod_read_reg(handle, 1, 0x0044, &mut buf)?;
-    if n != 4 {
-        eprintln!("dump_demod_i2cmcr_page1: expected 4 bytes, got {}", n);
+    let page: u8 = 1;
+    let base_addr: u16 = 0x0044;
+
+    let mut bytes = [0u8; 4];
+    for i in 0..4 {
+        bytes[i] = rtl_read_demod_reg_byte(handle, page, base_addr + i as u16)?;
     }
-    let val = u32::from_le_bytes(buf);
-    println!("DEM I2CMCR (page=1, addr=0x0044) = 0x{:08x}", val);
+
+    let val = u32::from_le_bytes(bytes);
+    println!(
+        "  DEMOD I2CMCR {} (page=0x{:02x}, addr=0x{:04x}..0x{:04x}) = 0x{:08x}",
+        label,
+        page,
+        base_addr,
+        base_addr + 3,
+        val
+    );
     Ok(())
 }
-
 
 /// Test that we can read and write a known USB register (USB_SYSCTL[7:0]).
 ///
@@ -620,6 +632,24 @@ fn rtl_demod_write_reg(
     }
     rtl_set_demod_reg(handle, page, addr, &data[..len as usize])
 }
+
+/// Convenience helper: read a single demod register byte using rtl_get_demod_reg.
+fn rtl_read_demod_reg_byte(
+    handle: &mut DeviceHandle<GlobalContext>,
+    page: u8,
+    addr: u16,
+) -> Result<u8, Error> {
+    let mut buf = [0u8; 1];
+    let n = rtl_get_demod_reg(handle, page, addr, &mut buf)?;
+    if n != 1 {
+        eprintln!(
+            "rtl_read_demod_reg_byte: expected 1 byte from demod page=0x{:02x}, addr=0x{:04x}, got {}",
+            page, addr, n
+        );
+    }
+    Ok(buf[0])
+}
+
 
 fn init_baseband(handle: &mut DeviceHandle<GlobalContext>) -> Result<(), rusb::Error> {
     println!("Initializing baseband (USB + demod power-up)...");
@@ -924,7 +954,7 @@ fn configure_for_adsb_1090mhz(
     }
 
     // 2b) Initialize I2C Master Control for simple single-shot transfers.
-    if let Err(e) = dump_demod_i2cmcr_page1(handle) {
+    if let Err(e) = dump_demod_i2cmcr_page1(handle, "BEFORE init") {
     eprintln!("  dump_demod_i2cmcr_page1 (before) failed: {:?}", e);
     }
 
@@ -934,7 +964,7 @@ fn configure_for_adsb_1090mhz(
         println!("  I2C Master Control (I2CMCR) initialized for simple single-shot mode.");
     }
 
-    if let Err(e) = dump_demod_i2cmcr_page1(handle) {
+    if let Err(e) = dump_demod_i2cmcr_page1(handle, "AFTER init") {
         eprintln!("  dump_demod_i2cmcr_page1 (after) failed: {:?}", e);
     }
 
