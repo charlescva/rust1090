@@ -938,12 +938,20 @@ fn configure_for_adsb_1090mhz(
         eprintln!("  No tuner responded to reg 0x00 probe (yet).");
     } else {
         println!(
-        "  Detected tuner at I2C addr 0x{:02x}, reg 0x00 = 0x{:02x} (likely R820T/R828D).",
-        0x34, 0x69
+            "  Detected tuner at I2C addr 0x{:02x}, reg 0x00 = 0x{:02x} (likely R820T/R828D).",
+            0x34, 0x69
         );
 
+        println!(
+            "Dumping first 0x20 tuner registers at TUNER_I2C_ADDR=0x{:02x}…",
+            constants::TUNER_I2C_ADDR
+        );
+        if let Err(e) = dump_tuner_registers(handle, constants::TUNER_I2C_ADDR, 0x00, 0x1f) {
+            eprintln!(" dump_tuner_registers failed: {:?}", e);
+        }
     }
-
+    
+    println!("  Tuner probe complete (see values above).");
     Ok(())
 }
 
@@ -1050,4 +1058,89 @@ fn rtl_read_tuner_reg_byte(
     Ok(buf[0])
 }
 
+/// Low-level tuner register *write* via the RTL2832U "SetTunReg" command.
+///
+/// From the datasheet vendor command table:
+/// - bmRequestType = 0x40 (host-to-device, vendor, device)
+/// - bRequest      = 0
+/// - wValue        = (OffsetAdd << 8) + IICAdd
+/// - wIndex        = 0x0310 (tuner block, write)
+/// - wLength       = data.len()
+fn rtl_set_tuner_reg(
+    handle: &mut DeviceHandle<GlobalContext>,
+    i2c_addr: u8,
+    reg: u8,
+    data: &[u8],
+) -> rusb::Result<usize> {
+    let request_type = constants::CTRL_OUT;
+    let request = 0u8;
+
+    // wValue = (OffsetAdd << 8) + IICAdd
+    let value: u16 = ((reg as u16) << 8) | (i2c_addr as u16);
+
+    // 0x0310 = SetTunReg (tuner block write)
+    let index: u16 = 0x0310u16;
+
+    handle.write_control(
+        request_type,
+        request,
+        value,
+        index,
+        data,
+        Duration::from_millis(constants::CTRL_TIMEOUT_MS),
+    )
+}
+
+/// Convenience wrapper: write exactly one tuner register byte.
+fn rtl_write_tuner_reg_byte(
+    handle: &mut DeviceHandle<GlobalContext>,
+    i2c_addr: u8,
+    reg: u8,
+    value: u8,
+) -> rusb::Result<()> {
+    let written = rtl_set_tuner_reg(handle, i2c_addr, reg, &[value])?;
+    if written != 1 {
+        eprintln!(
+            "rtl_write_tuner_reg_byte: wrote {} bytes (expected 1) \
+             to tuner addr=0x{:02x}, reg=0x{:02x}",
+            written, i2c_addr, reg
+        );
+    }
+    Ok(())
+}
+
+/// Debug helper: dump a range of tuner registers via GetTunReg.
+fn dump_tuner_registers(
+    handle: &mut DeviceHandle<GlobalContext>,
+    i2c_addr: u8,
+    first: u8,
+    last: u8,
+) -> rusb::Result<()> {
+    println!(
+        "Dumping tuner registers 0x{:02x}..0x{:02x} at I2C addr 0x{:02x}…",
+        first, last, i2c_addr
+    );
+
+    let mut reg = first;
+    loop {
+        match rtl_read_tuner_reg_byte(handle, i2c_addr, reg) {
+            Ok(val) => {
+                println!("  TUNER[0x{:02x}] = 0x{:02x}", reg, val);
+            }
+            Err(e) => {
+                println!(
+                    "  TUNER[0x{:02x}] read failed at addr 0x{:02x}: {:?}",
+                    reg, i2c_addr, e
+                );
+            }
+        }
+
+        if reg == last {
+            break;
+        }
+        reg = reg.wrapping_add(1);
+    }
+
+    Ok(())
+}
 
