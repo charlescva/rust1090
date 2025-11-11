@@ -937,7 +937,11 @@ fn configure_for_adsb_1090mhz(
     if !any_success {
         eprintln!("  No tuner responded to reg 0x00 probe (yet).");
     } else {
-        println!("  Tuner probe complete (see values above).");
+        println!(
+        "  Detected tuner at I2C addr 0x{:02x}, reg 0x00 = 0x{:02x} (likely R820T/R828D).",
+        0x34, 0x69
+        );
+
     }
 
     Ok(())
