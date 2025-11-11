@@ -1001,12 +1001,6 @@ fn configure_for_adsb_1090mhz(
             0x34, 0x69
         );
         
-        if let Some(addr) = detected_tuner_addr {
-            if let Err(e) = test_tuner_i2c_block_path(handle, addr) {
-                eprintln!("  test_tuner_i2c_block_path failed: {:?}", e);
-            }
-        }
-
 
         // Quick write/readback test on some register. We'll use 0x05 arbitrarily;
         // if it's read-only, the write is ignored, which is still harmless.
@@ -1019,6 +1013,10 @@ fn configure_for_adsb_1090mhz(
             eprintln!("  test_tuner_write_via_i2c_master failed: {:?}", e);
         }
 
+        // NEW: test the IICB-based tuner I2C path
+        if let Err(e) = test_tuner_i2c_block_path(handle, constants::TUNER_I2C_ADDR) {
+            eprintln!("  test_tuner_i2c_block_path failed: {:?}", e);
+        }
         
         // Try to apply 1090 MHz profile, if any.
         if let Err(e) = tuner_set_1090mhz(handle) {
@@ -1695,24 +1693,20 @@ fn test_tuner_write_via_i2c_master(
 
     Ok(())
 }
+
 fn rtl_read_array(
     handle: &mut DeviceHandle<GlobalContext>,
     block: u8,
     addr: u16,
     buf: &mut [u8],
 ) -> Result<usize, Error> {
-    let mut index: u16 = (block as u16) << 8;
-
-    // Special-case IRB as in librtlsdr
-    if block == constants::BLOCK_IRB {
-        index = ((constants::BLOCK_SYSB as u16) << 8) | 0x01;
-    }
+    let index: u16 = (block as u16) << 8;
 
     handle.read_control(
         constants::CTRL_IN,
         0,          // bRequest
         addr,       // wValue = I2C slave addr for IICB
-        index,      // wIndex = (block << 8) | maybe tag
+        index,      // wIndex = (block << 8)
         buf,
         Duration::from_millis(constants::CTRL_TIMEOUT_MS),
     )
@@ -1724,22 +1718,19 @@ fn rtl_write_array(
     addr: u16,
     data: &[u8],
 ) -> Result<usize, Error> {
-    let mut index: u16 = ((block as u16) << 8) | 0x10;
-
-    // Special-case IRB as in librtlsdr
-    if block == constants::BLOCK_IRB {
-        index = ((constants::BLOCK_SYSB as u16) << 8) | 0x11;
-    }
+    let index: u16 = ((block as u16) << 8) | 0x10;
 
     handle.write_control(
         constants::CTRL_OUT,
         0,          // bRequest
         addr,       // wValue = I2C slave addr for IICB
-        index,      // wIndex = (block << 8) | 0x10 (or IR-tag)
+        index,      // wIndex = (block << 8) | 0x10
         data,
         Duration::from_millis(constants::CTRL_TIMEOUT_MS),
     )
 }
+
+
 /// Low-level tuner I2C write via IICB block (matches rtlsdr_i2c_write_reg).
 fn rtl_tuner_i2c_write_reg_iicb(
     handle: &mut DeviceHandle<GlobalContext>,
